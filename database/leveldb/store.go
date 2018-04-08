@@ -210,3 +210,8 @@ func (s *Store) SaveChainStatus(block *types.Block, view *state.UtxoViewpoint, m
 	cleanMainchainDB(s.db, &hash)
 	return nil
 }
+
+func (s *Store)SaveUtxoView(view *state.UtxoViewpoint) error {
+	batch := s.db.NewBatch()
+	return saveUtxoView(batch, view)
+}
