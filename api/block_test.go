@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 	"errors"
-	"fmt"
 
 	dbm "github.com/tendermint/tmlibs/db"
 
@@ -25,64 +24,71 @@ import (
 )
 
 func TestNewBlock(t *testing.T) {
+	testNumber := 10
+	blockTxNumber := 5
+	totalTxNumber := testNumber * blockTxNumber
+
+	chain, txs, err := GenerateChainData(totalTxNumber)
+	if err != nil {
+		t.Fatal("GenerateChainData err:", err)
+	}
+
+	for i := 0; i < testNumber; i++ {
+		testTxs := txs[blockTxNumber*i : blockTxNumber*(i+1)]
+		if err := InsertChain(chain, testTxs); err != nil {
+			t.Fatal("Failed to insert block into chain:", err)
+		}
+	}
+}
+
+func GenerateChainData(txNumber int)  (*protocol.Chain, []*types.Tx, error) {
 	dirPath, err := ioutil.TempDir(".", "testDB")
 	if err != nil {
-		t.Fatal(err)
+		return nil, nil, err
 	}
 
 	testDB := dbm.NewDB("testdb", "leveldb", dirPath)
-	store := leveldb.NewStore(testDB)
 	defer os.RemoveAll(dirPath)
 
 	// generate utxos and transactions
-	utxos := mockUtxos(10)
-	txs, err := GenetrateTx(utxos, len(utxos))
+	baseUtxos := GenerateBaseUtxos(txNumber)
+	otherUtxos := GenerateOtherUtxos(txNumber)
+	txs, err := GenetrateTx(baseUtxos, otherUtxos, len(baseUtxos))
 	if err != nil {
-		t.Fatal("generate tx err:", err)
+		return nil, nil, err
 	}
 
 	// init UtxoViewpoint
 	utxoView := state.NewUtxoViewpoint()
-	utxoEntry := storage.NewUtxoEntry(false, 0, false)
+	utxoEntry := storage.NewUtxoEntry(false, 1, false)
 	for _, tx := range txs {
 		for _, id := range tx.SpentOutputIDs {
 			utxoView.Entries[id] = utxoEntry
-			fmt.Println("-----------spendoutputid:", id.String())
 		}
 	}
 
-	//testBlock := &types.Block{}
-	//testBlock.Version = 1
-	//
-	//if err := store.SaveChainStatus(testBlock, utxoView,nil); err != nil {
-	//	t.Fatal("save utxoView err:", err)
-	//}
-
-	if err := store.SaveUtxoView(utxoView); err != nil {
-		t.Fatal("SaveUtxoView err:", err)
+	if err := SetUtxoView(testDB, utxoView); err != nil {
+		return nil, nil, err
 	}
 
 	genesisBlock := config.GenerateGenesisBlock()
 	txPool := protocol.NewTxPool()
+	store := leveldb.NewStore(testDB)
 	chain, err := protocol.NewChain(genesisBlock.Hash(), store, txPool)
 	if err != nil {
-		t.Fatal("Failed to create chain structure:", err)
+		return nil, nil, err
 	}
 
 	if chain.BestBlockHash() == nil {
 		if err := chain.SaveBlock(genesisBlock); err != nil {
-			t.Fatal("Failed to save genesisBlock to store:", err)
+			return nil, nil, err
 		}
 		if err := chain.ConnectBlock(genesisBlock); err != nil {
-			t.Fatal("Failed to connect genesisBlock to chain:", err)
+			return nil, nil, err
 		}
 	}
 
-	for i := 0; i < 10; i++ {
-		if err := InsertChain(chain, txs); err != nil {
-			t.Fatal("Failed to insert block into chain:", err)
-		}
-	}
+	return chain, txs, nil
 }
 
 func InsertChain(chain *protocol.Chain, txs []*types.Tx) error {
@@ -115,6 +121,16 @@ func InsertChain(chain *protocol.Chain, txs []*types.Tx) error {
 	return nil
 }
 
+func InsertTxPool(chain *protocol.Chain, txs []*types.Tx) error {
+	for _, tx := range txs {
+		if err := txbuilder.FinalizeTx(nil, chain, tx); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func NewBlock(chain *protocol.Chain) (b *types.Block, err error) {
 	txpool := chain.GetTxPool()
 	return mining.NewBlockTemplate(chain, txpool, nil)
@@ -133,27 +149,7 @@ func SolveBlock(seed *bc.Hash, block *types.Block) error {
 	return nil
 }
 
-func mockUtxos(num int) []*account.UTXO {
-	utxos := []*account.UTXO{}
-	for i:= 0; i< num;i++{
-		utxo := MockUtxo(uint64(i),624000000000)
-		utxos = append(utxos, utxo)
-	}
-
-	return utxos
-}
-
-func InsertTxPool(chain *protocol.Chain, txs []*types.Tx) error {
-	for _, tx := range txs {
-		if err := txbuilder.FinalizeTx(nil, chain, tx); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func MockUtxo(index, amount uint64) *account.UTXO {
+func MockUtxo(index uint64, assetId *bc.AssetID, amount uint64) *account.UTXO {
 	ctrlProg := &account.CtrlProgram{
 		AccountID:      "",
 		Address:        "",
@@ -163,7 +159,7 @@ func MockUtxo(index, amount uint64) *account.UTXO {
 	}
 
 	assetAmount := bc.AssetAmount{
-		AssetId: consensus.BTMAssetID,
+		AssetId: assetId,
 		Amount:  amount,
 	}
 
@@ -181,6 +177,34 @@ func MockUtxo(index, amount uint64) *account.UTXO {
 	}
 
 	return utxo
+}
+
+func GenerateBaseUtxos(num int) ([]*account.UTXO) {
+	utxos := []*account.UTXO{}
+	for i:= 0; i< num;i++{
+		utxo := MockUtxo(uint64(i), consensus.BTMAssetID, 624000000000)
+		utxos = append(utxos, utxo)
+	}
+
+	return utxos
+}
+
+func GenerateOtherUtxos(num int) ([]*account.UTXO) {
+	utxos := []*account.UTXO{}
+
+	assetID := &bc.AssetID{
+		V0: uint64(18446744073709551615),
+		V1: uint64(1),
+		V2: uint64(0),
+		V3: uint64(1),
+	}
+
+	for i:= 0; i< num;i++{
+		utxo := MockUtxo(uint64(i), assetID, 6000)
+		utxos = append(utxos, utxo)
+	}
+
+	return utxos
 }
 
 func AddTxInputFromUtxo(utxo *account.UTXO) (*types.TxInput, *txbuilder.SigningInstruction, error) {
@@ -211,13 +235,31 @@ func CreateTxBuilder(utxo *account.UTXO) (*txbuilder.TemplateBuilder, error) {
 	tplBuilder.AddOutput(txOutput)
 
 	return tplBuilder, nil
-
 }
 
-func BuildTx(utxo *account.UTXO) (*types.Tx, error) {
-	tplBuilder, err := CreateTxBuilder(utxo)
+func AddTxBuilder(tplBuilder *txbuilder.TemplateBuilder, utxo *account.UTXO) error {
+	txInput, signInst, err := AddTxInputFromUtxo(utxo)
+	if err != nil {
+		return err
+	}
+	tplBuilder.AddInput(txInput, signInst)
+
+	txOutput := AddTxOutput(utxo.AssetID, utxo.Amount, utxo.ControlProgram)
+	tplBuilder.AddOutput(txOutput)
+
+	return nil
+}
+
+func BuildTx(baseUtxo *account.UTXO, otherUtxos []*account.UTXO) (*types.Tx, error) {
+	tplBuilder, err := CreateTxBuilder(baseUtxo)
 	if err != nil {
 		return nil, err
+	}
+
+	for _, u := range otherUtxos {
+		if err := AddTxBuilder(tplBuilder, u); err != nil {
+			return nil, err
+		}
 	}
 
 	tpl, _, err := tplBuilder.Build()
@@ -228,19 +270,36 @@ func BuildTx(utxo *account.UTXO) (*types.Tx, error) {
 	return tpl.Transaction, nil
 }
 
-func GenetrateTx(utxo []*account.UTXO, num int) ([]*types.Tx, error) {
-	if num < len(utxo) {
+func GenetrateTx(baseUtxo []*account.UTXO, otherUtxo []*account.UTXO, num int) ([]*types.Tx, error) {
+	if num > len(baseUtxo) || num > len(otherUtxo) {
 		return nil, errors.New("utxo is not enough")
 	}
 
+	txOtherUtxos := []*account.UTXO{}
 	txs := []*types.Tx{}
+
 	for i:= 0; i<num; i++{
-		tx, err := BuildTx(utxo[i])
+		// add other assetID utxo, only one utxo has been inserted into
+		txOtherUtxos = append(txOtherUtxos, otherUtxo[i])
+
+		tx, err := BuildTx(baseUtxo[i], txOtherUtxos)
 		if err != nil {
 			return nil, err
 		}
 		txs = append(txs, tx)
+
+		// reinit txOtherUtxos
+		txOtherUtxos = []*account.UTXO{}
 	}
 
 	return txs, nil
+}
+
+func SetUtxoView(db dbm.DB, view *state.UtxoViewpoint) error {
+	batch := db.NewBatch()
+	if err := leveldb.SaveUtxoView(batch, view); err != nil {
+		return err
+	}
+	batch.Write()
+	return nil
 }
